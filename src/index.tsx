@@ -10,14 +10,14 @@ storage.exemptFriends ??= true;
 storage.bannerExceptions ??= [];
 
 let patches = [];
-const sanitizedCache = new WeakMap();
 
-const RelationshipStore = findByStoreName("RelationshipStore");
 const isFriend = (id) => {
-  if (!id || !RelationshipStore) return false;
+  if (!id) return false;
   try {
-    if (RelationshipStore.isFriend) return RelationshipStore.isFriend(id);
-    return RelationshipStore.getRelationshipType?.(id) === 1;
+    const store = findByStoreName("RelationshipStore");
+    if (!store) return false;
+    if (store.isFriend) return store.isFriend(id);
+    return store.getRelationshipType?.(id) === 1;
   } catch {
     return false;
   }
@@ -29,45 +29,6 @@ const isExempt = (id) => {
   if (storage.bannerExceptions.includes(strId)) return true;
   if (storage.exemptFriends && isFriend(strId)) return true;
   return false;
-};
-
-const shallowClonePreserveProto = (obj) => {
-  if (!obj || typeof obj !== "object") return obj;
-  const clone = Object.create(Object.getPrototypeOf(obj));
-  Object.assign(clone, obj);
-  return clone;
-};
-
-const getSanitizedUser = (user) => {
-  if (!user || typeof user !== "object") return user;
-  if (!storage.removeBanner || isExempt(user.id)) return user;
-  let cached = sanitizedCache.get(user);
-  if (!cached) {
-    cached = shallowClonePreserveProto(user);
-    sanitizedCache.set(user, cached);
-  } else {
-    Object.assign(cached, user);
-  }
-  cached.banner = null;
-  cached.bannerColor = null;
-  cached.accentColor = cached.accentColor ?? null;
-  return cached;
-};
-
-const getSanitizedProfile = (profile) => {
-  if (!profile || typeof profile !== "object") return profile;
-  const id = profile.userId ?? profile.user?.id;
-  if (!storage.removeBanner || isExempt(id)) return profile;
-  let cached = sanitizedCache.get(profile);
-  if (!cached) {
-    cached = shallowClonePreserveProto(profile);
-    sanitizedCache.set(profile, cached);
-  } else {
-    Object.assign(cached, profile);
-  }
-  cached.banner = null;
-  if (cached.premiumGuildSince !== undefined) cached.themeColors = null;
-  return cached;
 };
 
 const safe = (fn) => (...args) => {
@@ -83,6 +44,7 @@ function Settings() {
   const [input, setInput] = React.useState("");
   const { FormSwitchRow, FormInput, FormRow, FormSection, FormDivider } = Forms;
   const { View } = ReactNative;
+  const h = React.createElement;
   const UserStore = findByStoreName("UserStore");
 
   const addException = () => {
@@ -106,55 +68,55 @@ function Settings() {
     forceUpdate();
   };
 
-  return (
-    <View>
-      <FormSection title="General">
-        <FormSwitchRow
-          label="Remove banners"
-          subLabel="Strips banners from users everywhere"
-          value={storage.removeBanner}
-          onValueChange={(v) => {
-            storage.removeBanner = v;
-            forceUpdate();
-          }}
-        />
-        <FormSwitchRow
-          label="Keep friends' banners"
-          subLabel="Friends are automatically whitelisted"
-          value={storage.exemptFriends}
-          onValueChange={(v) => {
-            storage.exemptFriends = v;
-            forceUpdate();
-          }}
-        />
-      </FormSection>
-
-      <FormSection title="Other exceptions">
-        <FormInput
-          title="User ID"
-          placeholder="Add a non-friend's user ID to keep their banner"
-          value={input}
-          onChange={setInput}
-          onSubmitEditing={addException}
-          returnKeyType="done"
-        />
-        <FormDivider />
-        {storage.bannerExceptions.length === 0 && (
-          <FormRow label="No manual exceptions added" />
-        )}
-        {storage.bannerExceptions.map((id) => {
-          const user = UserStore?.getUser?.(id);
-          return (
-            <FormRow
-              key={id}
-              label={user?.username ?? id}
-              subLabel={id}
-              onPress={() => removeException(id)}
-            />
-          );
-        })}
-      </FormSection>
-    </View>
+  return h(
+    View,
+    null,
+    h(
+      FormSection,
+      { title: "General" },
+      h(FormSwitchRow, {
+        label: "Remove banners",
+        subLabel: "Strips banners from users everywhere",
+        value: storage.removeBanner,
+        onValueChange: (v) => {
+          storage.removeBanner = v;
+          forceUpdate();
+        },
+      }),
+      h(FormSwitchRow, {
+        label: "Keep friends' banners",
+        subLabel: "Friends are automatically whitelisted",
+        value: storage.exemptFriends,
+        onValueChange: (v) => {
+          storage.exemptFriends = v;
+          forceUpdate();
+        },
+      })
+    ),
+    h(
+      FormSection,
+      { title: "Other exceptions" },
+      h(FormInput, {
+        title: "User ID",
+        placeholder: "Add a non-friend's user ID to keep their banner",
+        value: input,
+        onChange: setInput,
+        onSubmitEditing: addException,
+        returnKeyType: "done",
+      }),
+      h(FormDivider, null),
+      storage.bannerExceptions.length === 0 &&
+        h(FormRow, { label: "No manual exceptions added" }),
+      ...storage.bannerExceptions.map((id) => {
+        const user = UserStore?.getUser?.(id);
+        return h(FormRow, {
+          key: id,
+          label: user?.username ?? id,
+          subLabel: id,
+          onPress: () => removeException(id),
+        });
+      })
+    )
   );
 }
 
@@ -164,26 +126,6 @@ export default {
     const load = () => {
       unloadPatches();
       patches = [];
-
-      const userStore = findByStoreName("UserStore");
-      if (userStore?.getUser) {
-        patches.push(
-          after("getUser", userStore, safe((args, res) => {
-            if (!res) return res;
-            return getSanitizedUser(res);
-          }))
-        );
-      }
-
-      const userProfileStore = findByStoreName("UserProfileStore");
-      if (userProfileStore?.getUserProfile) {
-        patches.push(
-          after("getUserProfile", userProfileStore, safe((args, res) => {
-            if (!res) return res;
-            return getSanitizedProfile(res);
-          }))
-        );
-      }
 
       const bannerUrlMod = findByProps("getUserBannerURL", "getUserAvatarURL");
       if (bannerUrlMod?.getUserBannerURL) {
@@ -196,25 +138,15 @@ export default {
         );
       }
 
-      const hookMod = findByProps("useUser", "useUserBanner");
-      if (hookMod) {
-        if (hookMod.useUser) {
-          patches.push(
-            after("useUser", hookMod, safe((args, res) => {
-              if (!res) return res;
-              return getSanitizedUser(res);
-            }))
-          );
-        }
-        if (hookMod.useUserBanner) {
-          patches.push(
-            after("useUserBanner", hookMod, safe((args, url) => {
-              const id = args?.[0];
-              if (!storage.removeBanner || isExempt(id)) return url;
-              return null;
-            }))
-          );
-        }
+      const hookMod = findByProps("useUserBanner");
+      if (hookMod?.useUserBanner) {
+        patches.push(
+          after("useUserBanner", hookMod, safe((args, url) => {
+            const id = args?.[0];
+            if (!storage.removeBanner || isExempt(id)) return url;
+            return null;
+          }))
+        );
       }
     };
     load();
