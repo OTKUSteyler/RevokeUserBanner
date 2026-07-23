@@ -10,6 +10,7 @@ storage.exemptFriends ??= true;
 storage.bannerExceptions ??= [];
 
 let patches = [];
+const originalBanners = new Map(); // id -> { banner, bannerColor }
 
 const isFriend = (id) => {
   if (!id) return false;
@@ -31,6 +32,28 @@ const isExempt = (id) => {
   return false;
 };
 
+// mutates the real instance in place — never clones — so prototype
+// methods and private fields stay intact
+const applyBannerState = (obj, id) => {
+  if (!obj || typeof obj !== "object" || !id) return obj;
+  const shouldHide = storage.removeBanner && !isExempt(id);
+
+  if (shouldHide) {
+    if (obj.banner || obj.bannerColor) {
+      if (!originalBanners.has(id)) {
+        originalBanners.set(id, { banner: obj.banner ?? null, bannerColor: obj.bannerColor ?? null });
+      }
+      obj.banner = null;
+      obj.bannerColor = null;
+    }
+  } else if (originalBanners.has(id)) {
+    const orig = originalBanners.get(id);
+    if (obj.banner === null) obj.banner = orig.banner;
+    if (obj.bannerColor === null) obj.bannerColor = orig.bannerColor;
+  }
+  return obj;
+};
+
 const safe = (fn) => (...args) => {
   try {
     return fn(...args);
@@ -43,7 +66,7 @@ function Settings() {
   const [, forceUpdate] = React.useReducer((x) => x + 1, 0);
   const [input, setInput] = React.useState("");
   const { FormSwitchRow, FormInput, FormRow, FormSection, FormDivider } = Forms;
-  const { View } = ReactNative;
+  const { View, TouchableOpacity, Text } = ReactNative;
   const h = React.createElement;
   const UserStore = findByStoreName("UserStore");
 
@@ -61,6 +84,7 @@ function Settings() {
     storage.bannerExceptions.push(id);
     setInput("");
     forceUpdate();
+    showToast("Added to exceptions");
   };
 
   const removeException = (id) => {
@@ -104,6 +128,22 @@ function Settings() {
         onSubmitEditing: addException,
         returnKeyType: "done",
       }),
+      h(
+        TouchableOpacity,
+        {
+          onPress: addException,
+          style: {
+            marginHorizontal: 16,
+            marginTop: 8,
+            marginBottom: 4,
+            paddingVertical: 10,
+            borderRadius: 8,
+            backgroundColor: "#5865F2",
+            alignItems: "center",
+          },
+        },
+        h(Text, { style: { color: "#fff", fontWeight: "600" } }, "Add User ID")
+      ),
       h(FormDivider, null),
       storage.bannerExceptions.length === 0 &&
         h(FormRow, { label: "No manual exceptions added" }),
@@ -122,10 +162,36 @@ function Settings() {
 
 export default {
   onLoad() {
+    let reassertTimer = null;
     const unloadPatches = () => patches.forEach((p) => p?.());
-    const load = () => {
+
+    const applyPatches = () => {
       unloadPatches();
       patches = [];
+
+      const userStore = findByStoreName("UserStore");
+      if (userStore?.getUser) {
+        patches.push(
+          after("getUser", userStore, safe((args, res) => {
+            if (!res) return res;
+            applyBannerState(res, res.id);
+            return res;
+          }))
+        );
+      }
+
+      const userProfileStore = findByStoreName("UserProfileStore");
+      if (userProfileStore?.getUserProfile) {
+        patches.push(
+          after("getUserProfile", userProfileStore, safe((args, res) => {
+            if (!res) return res;
+            const id = res.userId ?? res.user?.id ?? args?.[0];
+            applyBannerState(res, id);
+            if (res.user) applyBannerState(res.user, id);
+            return res;
+          }))
+        );
+      }
 
       const bannerUrlMod = findByProps("getUserBannerURL", "getUserAvatarURL");
       if (bannerUrlMod?.getUserBannerURL) {
@@ -149,10 +215,18 @@ export default {
         );
       }
     };
-    load();
+
+    applyPatches();
+    setTimeout(applyPatches, 3000);
+    reassertTimer = setInterval(applyPatches, 15000);
+
+    this._cleanup = () => {
+      if (reassertTimer) clearInterval(reassertTimer);
+      unloadPatches();
+    };
   },
   onUnload() {
-    patches.forEach((p) => p?.());
+    this._cleanup?.();
   },
   settings: Settings,
 };
