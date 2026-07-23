@@ -45,6 +45,14 @@ const getSanitizedProfile = (profile) => {
   return cached;
 };
 
+const safe = (fn, fallback) => (...args) => {
+  try {
+    return fn(...args);
+  } catch {
+    return fallback;
+  }
+};
+
 export default {
   onLoad() {
     const unloadPatches = () => patches.forEach((p) => p?.());
@@ -52,61 +60,53 @@ export default {
       unloadPatches();
       patches = [];
 
-      [findByProps("getUser"), findByStoreName("UserStore")]
-        .filter(Boolean)
-        .forEach((store) => {
-          if (!store.getUser) return;
-          patches.push(
-            after("getUser", store, (args, res) => {
-              if (!res || !storage.removeBanner) return res;
-              return getSanitizedUser(res);
-            })
-          );
-        });
-
-      [findByProps("getUserProfile"), findByStoreName("UserProfileStore")]
-        .filter(Boolean)
-        .forEach((store) => {
-          if (!store.getUserProfile) return;
-          patches.push(
-            after("getUserProfile", store, (args, res) => {
-              if (!res || !storage.removeBanner) return res;
-              return getSanitizedProfile(res);
-            })
-          );
-        });
-
-      const userBannerMods = [findByProps("getUserBannerURL")].filter(Boolean);
-      userBannerMods.forEach((mod) => {
-        if (!mod.getUserBannerURL) return;
+      const userStore = findByStoreName("UserStore");
+      if (userStore?.getUser) {
         patches.push(
-          after("getUserBannerURL", mod, (args, url) => (storage.removeBanner ? null : url))
+          after("getUser", userStore, safe((args, res) => {
+            if (!res || !storage.removeBanner) return res;
+            return getSanitizedUser(res);
+          }, undefined))
         );
-      });
+      }
 
-      const seen = new Set();
-      const bannerHookMods = [findByProps("useUser", "useUserBanner"), findByProps("useUserBanner")]
-        .filter(Boolean)
-        .filter((mod) => {
-          if (seen.has(mod)) return false;
-          seen.add(mod);
-          return true;
-        });
-      bannerHookMods.forEach((mod) => {
-        if (mod.useUser) {
+      const userProfileStore = findByStoreName("UserProfileStore");
+      if (userProfileStore?.getUserProfile) {
+        patches.push(
+          after("getUserProfile", userProfileStore, safe((args, res) => {
+            if (!res || !storage.removeBanner) return res;
+            return getSanitizedProfile(res);
+          }, undefined))
+        );
+      }
+
+      const bannerUrlMod = findByProps("getUserBannerURL", "getUserAvatarURL");
+      if (bannerUrlMod?.getUserBannerURL) {
+        patches.push(
+          after("getUserBannerURL", bannerUrlMod, safe((args, url) =>
+            storage.removeBanner ? null : url
+          , undefined))
+        );
+      }
+
+      const hookMod = findByProps("useUser", "useUserBanner");
+      if (hookMod) {
+        if (hookMod.useUser) {
           patches.push(
-            after("useUser", mod, (args, res) => {
+            after("useUser", hookMod, safe((args, res) => {
               if (!res || !storage.removeBanner) return res;
               return getSanitizedUser(res);
-            })
+            }, undefined))
           );
         }
-        if (mod.useUserBanner) {
+        if (hookMod.useUserBanner) {
           patches.push(
-            after("useUserBanner", mod, (args, url) => (storage.removeBanner ? null : url))
+            after("useUserBanner", hookMod, safe((args, url) =>
+              storage.removeBanner ? null : url
+            , undefined))
           );
         }
-      });
+      }
     };
     load();
   },
