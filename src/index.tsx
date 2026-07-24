@@ -10,7 +10,7 @@ storage.exemptFriends ??= true;
 storage.bannerExceptions ??= [];
 
 let patches = [];
-const originalBanners = new Map(); // id -> { banner, bannerColor }
+const originalBanners = new Map(); 
 
 const isFriend = (id) => {
   if (!id) return false;
@@ -32,8 +32,8 @@ const isExempt = (id) => {
   return false;
 };
 
-// mutates the real instance in place — never clones — so prototype
-// methods and private fields stay intact
+
+
 const applyBannerState = (obj, id) => {
   if (!obj || typeof obj !== "object" || !id) return obj;
   const shouldHide = storage.removeBanner && !isExempt(id);
@@ -162,7 +162,6 @@ function Settings() {
 
 export default {
   onLoad() {
-    let reassertTimer = null;
     const unloadPatches = () => patches.forEach((p) => p?.());
 
     const applyPatches = () => {
@@ -217,16 +216,9 @@ export default {
     };
 
     applyPatches();
-    setTimeout(applyPatches, 3000);
-    reassertTimer = setInterval(applyPatches, 15000);
-
-    this._cleanup = () => {
-      if (reassertTimer) clearInterval(reassertTimer);
-      unloadPatches();
-    };
   },
   onUnload() {
-    this._cleanup?.();
+    patches.forEach((p) => p?.());
   },
   settings: Settings,
 };
