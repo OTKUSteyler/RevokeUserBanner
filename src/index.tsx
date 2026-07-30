@@ -93,6 +93,11 @@ const safe = (fn) => (...args) => {
   }
 };
 
+const idFromArgs = (args, res) =>
+  res?.id ?? res?.userId ?? res?.user?.id ??
+  args?.[0]?.id ?? args?.[0] ??
+  args?.[1]?.id ?? args?.[1];
+
 function Settings() {
   const [, forceUpdate] = React.useReducer((x) => x + 1, 0);
   const [input, setInput] = React.useState("");
@@ -199,6 +204,8 @@ export default {
       unloadPatches();
       patches = [];
 
+      // --- Original targeted patches (kept — cheap, and correct when they hit) ---
+
       const userStore = findByStoreName("UserStore");
       if (userStore?.getUser) {
         patches.push(
@@ -222,8 +229,6 @@ export default {
         );
       }
 
-      // Separate store some clients use specifically for per-guild member
-      // profiles (server-specific banner/bio). Not always present.
       const guildMemberProfileStore = findByStoreName("GuildMemberProfileStore");
       if (guildMemberProfileStore?.getGuildMemberProfile) {
         patches.push(
@@ -246,7 +251,6 @@ export default {
         );
       }
 
-      // Server-specific banner URL getter, if this client build has one.
       if (bannerUrlMod?.getGuildMemberBannerURL) {
         patches.push(
           after("getGuildMemberBannerURL", bannerUrlMod, safe((args, url) => {
@@ -266,6 +270,68 @@ export default {
             return null;
           }))
         );
+      }
+
+      // --- Generic sweep: catches whatever accessor the per-server popout
+      // actually uses, even if its exact method name isn't one of the above ---
+
+      const allStoreNames = [
+        "UserStore",
+        "UserProfileStore",
+        "GuildMemberProfileStore",
+        "GuildMemberStore",
+        "GuildStore",
+      ];
+
+      allStoreNames.forEach((name) => {
+        const store = findByStoreName(name);
+        if (!store) return;
+
+        const proto = Object.getPrototypeOf(store);
+        const methodNames = Object.getOwnPropertyNames(proto).filter(
+          (k) =>
+            typeof store[k] === "function" &&
+            /banner/i.test(k) &&
+            !/^(set|update|_)/i.test(k)
+        );
+
+        methodNames.forEach((methodName) => {
+          patches.push(
+            after(methodName, store, safe((args, res) => {
+              if (!res) return res;
+              const id = idFromArgs(args, res);
+              if (!storage.removeBanner || isExempt(id)) return res;
+
+              // If it returns a URL/string directly, just null it out
+              if (typeof res === "string") return null;
+
+              // Otherwise treat it as an object/record and strip banner fields
+              let next = applyBannerState(res, id);
+
+              if (next?.user) next.user = applyBannerState(next.user, id);
+              if (next?.guildMemberProfile) {
+                next.guildMemberProfile = applyBannerState(next.guildMemberProfile, id);
+              }
+              return next;
+            }))
+          );
+        });
+      });
+
+      const bannerPropsSweep = findByProps("getUserBannerURL", "getUserAvatarURL");
+      if (bannerPropsSweep) {
+        Object.keys(bannerPropsSweep)
+          .filter((k) => typeof bannerPropsSweep[k] === "function" && /banner/i.test(k))
+          .forEach((fnName) => {
+            patches.push(
+              after(fnName, bannerPropsSweep, safe((args, url) => {
+                if (!url) return url;
+                const id = args?.[0]?.id ?? args?.[0] ?? args?.[1]?.id ?? args?.[1];
+                if (!storage.removeBanner || isExempt(id)) return url;
+                return typeof url === "string" ? null : url;
+              }))
+            );
+          });
       }
     };
 
