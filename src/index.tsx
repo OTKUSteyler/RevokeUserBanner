@@ -10,7 +10,6 @@ storage.exemptFriends ??= true;
 storage.bannerExceptions ??= [];
 
 let patches = [];
-const originalBanners = new Map(); 
 
 const isFriend = (id) => {
   if (!id) return false;
@@ -32,26 +31,34 @@ const isExempt = (id) => {
   return false;
 };
 
+// Returns a shallow clone with banner fields nulled — never mutates the
+// original, since Discord's profile records are frequently frozen and a
+// direct assignment silently no-ops (or throws, which safe() swallows).
+const stripBannerFields = (obj) => {
+  if (!obj || typeof obj !== "object") return obj;
+  return { ...obj, banner: null, bannerColor: null };
+};
 
+// Server-specific ("per-guild") profiles carry their own banner override,
+// nested under a key that's commonly `guildMemberProfile`. If the field
+// name differs on your client build, inspect a live getUserProfile()
+// result in the debugger and adjust the key below.
+const GUILD_PROFILE_KEY = "guildMemberProfile";
 
-const applyBannerState = (obj, id) => {
-  if (!obj || typeof obj !== "object" || !id) return obj;
-  const shouldHide = storage.removeBanner && !isExempt(id);
+const applyBannerState = (profile, id) => {
+  if (!profile || typeof profile !== "object" || !id) return profile;
+  if (!storage.removeBanner || isExempt(id)) return profile;
 
-  if (shouldHide) {
-    if (obj.banner || obj.bannerColor) {
-      if (!originalBanners.has(id)) {
-        originalBanners.set(id, { banner: obj.banner ?? null, bannerColor: obj.bannerColor ?? null });
-      }
-      obj.banner = null;
-      obj.bannerColor = null;
-    }
-  } else if (originalBanners.has(id)) {
-    const orig = originalBanners.get(id);
-    if (obj.banner === null) obj.banner = orig.banner;
-    if (obj.bannerColor === null) obj.bannerColor = orig.bannerColor;
+  let result = stripBannerFields(profile);
+
+  if (result[GUILD_PROFILE_KEY]) {
+    result = {
+      ...result,
+      [GUILD_PROFILE_KEY]: stripBannerFields(result[GUILD_PROFILE_KEY]),
+    };
   }
-  return obj;
+
+  return result;
 };
 
 const safe = (fn) => (...args) => {
@@ -100,7 +107,7 @@ function Settings() {
       { title: "General" },
       h(FormSwitchRow, {
         label: "Remove banners",
-        subLabel: "Strips banners from users everywhere",
+        subLabel: "Strips banners from users everywhere, including server profiles",
         value: storage.removeBanner,
         onValueChange: (v) => {
           storage.removeBanner = v;
@@ -173,8 +180,7 @@ export default {
         patches.push(
           after("getUser", userStore, safe((args, res) => {
             if (!res) return res;
-            applyBannerState(res, res.id);
-            return res;
+            return { ...res, ...applyBannerState(res, res.id) };
           }))
         );
       }
@@ -185,9 +191,22 @@ export default {
           after("getUserProfile", userProfileStore, safe((args, res) => {
             if (!res) return res;
             const id = res.userId ?? res.user?.id ?? args?.[0];
-            applyBannerState(res, id);
-            if (res.user) applyBannerState(res.user, id);
-            return res;
+            let next = applyBannerState(res, id);
+            if (next.user) next = { ...next, user: applyBannerState(next.user, id) };
+            return next;
+          }))
+        );
+      }
+
+      // Separate store some clients use specifically for per-guild member
+      // profiles (server-specific banner/bio). Not always present.
+      const guildMemberProfileStore = findByStoreName("GuildMemberProfileStore");
+      if (guildMemberProfileStore?.getGuildMemberProfile) {
+        patches.push(
+          after("getGuildMemberProfile", guildMemberProfileStore, safe((args, res) => {
+            if (!res) return res;
+            const id = res.userId ?? args?.[1] ?? args?.[0];
+            return applyBannerState(res, id);
           }))
         );
       }
@@ -197,6 +216,17 @@ export default {
         patches.push(
           after("getUserBannerURL", bannerUrlMod, safe((args, url) => {
             const id = args?.[0]?.id ?? args?.[0];
+            if (!storage.removeBanner || isExempt(id)) return url;
+            return null;
+          }))
+        );
+      }
+
+      // Server-specific banner URL getter, if this client build has one.
+      if (bannerUrlMod?.getGuildMemberBannerURL) {
+        patches.push(
+          after("getGuildMemberBannerURL", bannerUrlMod, safe((args, url) => {
+            const id = args?.[0]?.userId ?? args?.[0]?.id ?? args?.[1];
             if (!storage.removeBanner || isExempt(id)) return url;
             return null;
           }))
