@@ -1,4 +1,4 @@
-import { after } from "@vendetta/patcher";
+import { after, before } from "@vendetta/patcher";
 import { findByProps, findByStoreName } from "@vendetta/metro";
 import { storage } from "@vendetta/plugin";
 import { React, ReactNative } from "@vendetta/metro/common";
@@ -8,6 +8,7 @@ import { showToast } from "@vendetta/ui/toasts";
 storage.removeBanner ??= true;
 storage.exemptFriends ??= true;
 storage.bannerExceptions ??= [];
+storage.debugLogSheets ??= false; // flip true temporarily to log ActionSheet props
 
 let patches = [];
 
@@ -97,6 +98,37 @@ const idFromArgs = (args, res) =>
   res?.id ?? res?.userId ?? res?.user?.id ??
   args?.[0]?.id ?? args?.[0] ??
   args?.[1]?.id ?? args?.[1];
+
+// Deep, generic sweep for banner-shaped fields inside an arbitrary object
+// (e.g. ActionSheet props passed straight into openLazy). Used when we don't
+// know the exact shape ahead of time — walks nested objects/arrays a few
+// levels deep and nulls out anything matching BANNER_FIELDS or a banner URL
+// string, without touching functions or breaking prototypes on the way.
+const deepStripBanners = (value, seen = new WeakSet(), depth = 0) => {
+  if (!value || typeof value !== "object" || depth > 4) return value;
+  if (seen.has(value)) return value;
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      value[i] = deepStripBanners(value[i], seen, depth + 1);
+    }
+    return value;
+  }
+
+  for (const key of Object.keys(value)) {
+    if (typeof value[key] === "function") continue;
+    if (/^banner$/i.test(key) || /^bannercolor$/i.test(key)) {
+      value[key] = null;
+    } else if (/banner/i.test(key) && typeof value[key] === "string") {
+      value[key] = null;
+    } else if (value[key] && typeof value[key] === "object") {
+      value[key] = deepStripBanners(value[key], seen, depth + 1);
+    }
+  }
+
+  return value;
+};
 
 function Settings() {
   const [, forceUpdate] = React.useReducer((x) => x + 1, 0);
@@ -191,6 +223,19 @@ function Settings() {
           subLabel: id,
           onPress: () => removeException(id),
         });
+      })
+    ),
+    h(
+      FormSection,
+      { title: "Debug" },
+      h(FormSwitchRow, {
+        label: "Log ActionSheet props",
+        subLabel: "Logs UserProfile popout props to console for troubleshooting",
+        value: storage.debugLogSheets,
+        onValueChange: (v) => {
+          storage.debugLogSheets = v;
+          forceUpdate();
+        },
       })
     )
   );
@@ -332,6 +377,51 @@ export default {
               }))
             );
           });
+      }
+
+      // --- ActionSheet interception: covers UserProfile popouts whose
+      // banner data is baked into the sheet's props at open-time, rather
+      // than fetched from a store getter after mount (per ActionSheetFinder,
+      // this popout is registered as "UserProfile<id>"). We patch the sheet
+      // opener itself and strip any banner-shaped field from its props
+      // before the sheet ever renders. ---
+
+      const sheetsMod =
+        findByProps("openLazy", "hideActionSheet") ||
+        findByProps("openLazy") ||
+        findByProps("hideActionSheet");
+
+      if (sheetsMod?.openLazy) {
+        patches.push(
+          before("openLazy", sheetsMod, safe((args) => {
+            // args[1] is typically the sheet key (e.g. "UserProfile..."),
+            // args[2] is typically the props object passed to the component.
+            const key = args?.[1];
+            if (typeof key !== "string" || !key.startsWith("UserProfile")) return;
+
+            const props = args?.[2];
+            if (!props || typeof props !== "object") return;
+
+            const id =
+              props.userId ?? props.user?.id ?? props.id ??
+              (key.match(/UserProfile(\d+)/)?.[1]);
+
+            if (storage.debugLogSheets) {
+              try {
+                console.log(
+                  "[bannerdebug] openLazy key:", key,
+                  "props:", JSON.stringify(props, (k, v) => (typeof v === "function" ? "[fn]" : v), 2)
+                );
+              } catch {
+                console.log("[bannerdebug] openLazy key:", key, "(props not JSON-serializable)");
+              }
+            }
+
+            if (!storage.removeBanner || isExempt(id)) return;
+
+            deepStripBanners(props);
+          }))
+        );
       }
     };
 
