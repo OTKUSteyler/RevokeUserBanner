@@ -31,13 +31,38 @@ const isExempt = (id) => {
   return false;
 };
 
-// Returns a shallow clone with banner fields nulled — never mutates the
-// original, since Discord's profile records are frequently frozen and a
-// direct assignment silently no-ops (or throws, which safe() swallows).
-const stripBannerFields = (obj) => {
+const BANNER_FIELDS = ["banner", "bannerColor"];
+
+// Returns a version of obj with banner fields nulled, WITHOUT losing its
+// prototype chain. A plain `{ ...obj }` spread strips the class prototype,
+// which drops methods other parts of Discord expect to still exist on the
+// object — that's what caused "undefined is not a function" crashes.
+const withNulledFields = (obj, fields) => {
   if (!obj || typeof obj !== "object") return obj;
-  return { ...obj, banner: null, bannerColor: null };
+
+  // Prefer the record's own immutable update method if it has one (common
+  // on Immutable.js-style records) — safest, keeps all invariants intact.
+  if (typeof obj.set === "function") {
+    let next = obj;
+    for (const f of fields) {
+      try {
+        next = next.set(f, null);
+      } catch {
+        // field not present on this record type — ignore
+      }
+    }
+    return next;
+  }
+
+  // Fallback: clone onto the same prototype so any class methods
+  // (getAvatarURL, etc.) keep working after the copy.
+  const clone = Object.create(Object.getPrototypeOf(obj));
+  Object.assign(clone, obj);
+  for (const f of fields) clone[f] = null;
+  return clone;
 };
+
+const stripBannerFields = (obj) => withNulledFields(obj, BANNER_FIELDS);
 
 // Server-specific ("per-guild") profiles carry their own banner override,
 // nested under a key that's commonly `guildMemberProfile`. If the field
@@ -52,10 +77,9 @@ const applyBannerState = (profile, id) => {
   let result = stripBannerFields(profile);
 
   if (result[GUILD_PROFILE_KEY]) {
-    result = {
-      ...result,
-      [GUILD_PROFILE_KEY]: stripBannerFields(result[GUILD_PROFILE_KEY]),
-    };
+    // Overwrite the one property rather than spreading the whole object,
+    // so result keeps whatever prototype stripBannerFields gave it.
+    result[GUILD_PROFILE_KEY] = stripBannerFields(result[GUILD_PROFILE_KEY]);
   }
 
   return result;
@@ -180,7 +204,7 @@ export default {
         patches.push(
           after("getUser", userStore, safe((args, res) => {
             if (!res) return res;
-            return { ...res, ...applyBannerState(res, res.id) };
+            return applyBannerState(res, res.id);
           }))
         );
       }
@@ -191,8 +215,8 @@ export default {
           after("getUserProfile", userProfileStore, safe((args, res) => {
             if (!res) return res;
             const id = res.userId ?? res.user?.id ?? args?.[0];
-            let next = applyBannerState(res, id);
-            if (next.user) next = { ...next, user: applyBannerState(next.user, id) };
+            const next = applyBannerState(res, id);
+            if (next.user) next.user = applyBannerState(next.user, id);
             return next;
           }))
         );
