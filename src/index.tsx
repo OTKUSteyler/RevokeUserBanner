@@ -10,8 +10,18 @@ storage.exemptFriends ??= true;
 storage.bannerExceptions ??= [];
 storage.debugLogSheets ??= false; // flip true temporarily to log ActionSheet props
 storage.keepCustomBanners ??= true; // keep banners set by plugins like UserBG
+storage.exemptSelf ??= true; // never hide your own banner
 
 let patches = [];
+
+const getCurrentUserId = () => {
+  try {
+    const store = findByStoreName("UserStore");
+    return store?.getCurrentUser?.()?.id ?? null;
+  } catch {
+    return null;
+  }
+};
 
 const isFriend = (id) => {
   if (!id) return false;
@@ -28,6 +38,7 @@ const isFriend = (id) => {
 const isExempt = (id) => {
   if (!id) return false;
   const strId = String(id);
+  if (storage.exemptSelf && strId === String(getCurrentUserId())) return true;
   if (storage.bannerExceptions.includes(strId)) return true;
   if (storage.exemptFriends && isFriend(strId)) return true;
   return false;
@@ -214,6 +225,15 @@ function Settings() {
         value: storage.removeBanner,
         onValueChange: (v) => {
           storage.removeBanner = v;
+          forceUpdate();
+        },
+      }),
+      h(FormSwitchRow, {
+        label: "Don't hide my own banner",
+        subLabel: "Always show your own profile banner to yourself",
+        value: storage.exemptSelf,
+        onValueChange: (v) => {
+          storage.exemptSelf = v;
           forceUpdate();
         },
       }),
