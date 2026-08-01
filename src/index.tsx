@@ -9,6 +9,7 @@ storage.removeBanner ??= true;
 storage.exemptFriends ??= true;
 storage.bannerExceptions ??= [];
 storage.debugLogSheets ??= false; // flip true temporarily to log ActionSheet props
+storage.keepCustomBanners ??= true; // keep banners set by plugins like UserBG
 
 let patches = [];
 
@@ -34,6 +35,38 @@ const isExempt = (id) => {
 
 const BANNER_FIELDS = ["banner", "bannerColor"];
 
+// UserBG-style plugins override the banner URL with an image hosted
+// elsewhere (their own asset host / a user-picked URL), while leaving
+// Discord's own banner resolution untouched under the hood. We want to
+// strip Discord's real banners but never touch a banner URL that isn't
+// actually coming from Discord's CDN — that's how we tell "real Discord
+// banner" apart from "banner injected by another plugin".
+const DISCORD_CDN_HOSTS = ["cdn.discordapp.com", "media.discordapp.net"];
+const DISCORD_HASH_RE = /^a_?[0-9a-f]{32}$/i;
+
+const isDiscordCdnBannerUrl = (url) => {
+  if (typeof url !== "string") return false;
+  try {
+    const u = new URL(url);
+    return DISCORD_CDN_HOSTS.includes(u.hostname) && /\/banners\//.test(u.pathname);
+  } catch {
+    return false;
+  }
+};
+
+// Given any string value found in a "banner"-ish field, decide whether it's
+// safe to strip: either a real Discord CDN banner URL, or a raw Discord
+// banner hash (the format Discord stores on the user object before it's
+// turned into a URL). Anything else — a custom host, a data URL, a plugin's
+// own asset path — is assumed to belong to something like UserBG and is
+// left alone.
+const shouldStripBannerValue = (val) => {
+  if (typeof val !== "string") return true;
+  if (isDiscordCdnBannerUrl(val)) return true;
+  if (DISCORD_HASH_RE.test(val)) return true;
+  return false;
+};
+
 // Returns a version of obj with banner fields nulled, WITHOUT losing its
 // prototype chain. A plain `{ ...obj }` spread strips the class prototype,
 // which drops methods other parts of Discord expect to still exist on the
@@ -41,11 +74,17 @@ const BANNER_FIELDS = ["banner", "bannerColor"];
 const withNulledFields = (obj, fields) => {
   if (!obj || typeof obj !== "object") return obj;
 
+  const fieldsToNull = fields.filter((f) => {
+    if (f !== "banner") return true; // bannerColor etc. always safe to strip
+    if (!storage.keepCustomBanners) return true;
+    return shouldStripBannerValue(obj[f]);
+  });
+
   // Prefer the record's own immutable update method if it has one (common
   // on Immutable.js-style records) — safest, keeps all invariants intact.
   if (typeof obj.set === "function") {
     let next = obj;
-    for (const f of fields) {
+    for (const f of fieldsToNull) {
       try {
         next = next.set(f, null);
       } catch {
@@ -59,7 +98,7 @@ const withNulledFields = (obj, fields) => {
   // (getAvatarURL, etc.) keep working after the copy.
   const clone = Object.create(Object.getPrototypeOf(obj));
   Object.assign(clone, obj);
-  for (const f of fields) clone[f] = null;
+  for (const f of fieldsToNull) clone[f] = null;
   return clone;
 };
 
@@ -118,10 +157,13 @@ const deepStripBanners = (value, seen = new WeakSet(), depth = 0) => {
 
   for (const key of Object.keys(value)) {
     if (typeof value[key] === "function") continue;
-    if (/^banner$/i.test(key) || /^bannercolor$/i.test(key)) {
+
+    if (/^bannercolor$/i.test(key)) {
       value[key] = null;
-    } else if (/banner/i.test(key) && typeof value[key] === "string") {
-      value[key] = null;
+    } else if (/^banner$/i.test(key) || (/banner/i.test(key) && typeof value[key] === "string")) {
+      if (!storage.keepCustomBanners || shouldStripBannerValue(value[key])) {
+        value[key] = null;
+      }
     } else if (value[key] && typeof value[key] === "object") {
       value[key] = deepStripBanners(value[key], seen, depth + 1);
     }
@@ -181,6 +223,15 @@ function Settings() {
         value: storage.exemptFriends,
         onValueChange: (v) => {
           storage.exemptFriends = v;
+          forceUpdate();
+        },
+      }),
+      h(FormSwitchRow, {
+        label: "Keep custom banners",
+        subLabel: "Don't strip banners set by plugins like UserBG",
+        value: storage.keepCustomBanners,
+        onValueChange: (v) => {
+          storage.keepCustomBanners = v;
           forceUpdate();
         },
       })
@@ -291,6 +342,7 @@ export default {
           after("getUserBannerURL", bannerUrlMod, safe((args, url) => {
             const id = args?.[0]?.id ?? args?.[0];
             if (!storage.removeBanner || isExempt(id)) return url;
+            if (storage.keepCustomBanners && !shouldStripBannerValue(url)) return url;
             return null;
           }))
         );
@@ -301,6 +353,7 @@ export default {
           after("getGuildMemberBannerURL", bannerUrlMod, safe((args, url) => {
             const id = args?.[0]?.userId ?? args?.[0]?.id ?? args?.[1];
             if (!storage.removeBanner || isExempt(id)) return url;
+            if (storage.keepCustomBanners && !shouldStripBannerValue(url)) return url;
             return null;
           }))
         );
@@ -312,6 +365,7 @@ export default {
           after("useUserBanner", hookMod, safe((args, url) => {
             const id = args?.[0];
             if (!storage.removeBanner || isExempt(id)) return url;
+            if (storage.keepCustomBanners && !shouldStripBannerValue(url)) return url;
             return null;
           }))
         );
@@ -347,8 +401,12 @@ export default {
               const id = idFromArgs(args, res);
               if (!storage.removeBanner || isExempt(id)) return res;
 
-              // If it returns a URL/string directly, just null it out
-              if (typeof res === "string") return null;
+              // If it returns a URL/string directly, only null it if it's a
+              // genuine Discord banner — leave custom (e.g. UserBG) URLs alone
+              if (typeof res === "string") {
+                if (storage.keepCustomBanners && !shouldStripBannerValue(res)) return res;
+                return null;
+              }
 
               // Otherwise treat it as an object/record and strip banner fields
               let next = applyBannerState(res, id);
@@ -373,7 +431,9 @@ export default {
                 if (!url) return url;
                 const id = args?.[0]?.id ?? args?.[0] ?? args?.[1]?.id ?? args?.[1];
                 if (!storage.removeBanner || isExempt(id)) return url;
-                return typeof url === "string" ? null : url;
+                if (typeof url !== "string") return url;
+                if (storage.keepCustomBanners && !shouldStripBannerValue(url)) return url;
+                return null;
               }))
             );
           });
